@@ -40,7 +40,7 @@ The React site and the API share one CloudFront distribution, so the browser see
 
 | Layer | Choice |
 |---|---|
-| Frontend | React + Vite + TypeScript, React Router |
+| Frontend | React + Vite + JavaScript, React Router |
 | API | Node.js 22, Express, `serverless-http` |
 | Compute | AWS Lambda behind API Gateway HTTP API |
 | Data | DynamoDB, four on-demand tables |
@@ -56,7 +56,9 @@ The React site and the API share one CloudFront distribution, so the browser see
 .
 ├── README.md
 ├── docs/
-│   └── design.md          # full design, flows, data model, API, security, deployment
+│   ├── design.md          # full design, flows, data model, API, security, deployment
+│   └── adr/
+│       └── 0001-serverless-authentication.md
 ├── .gitignore
 └── (application and infrastructure code will be added after design approval)
 ```
@@ -64,6 +66,7 @@ The React site and the API share one CloudFront distribution, so the browser see
 ## Documentation
 
 - [Design document](docs/design.md) — goals, non-goals, architecture, DynamoDB model, API contract, security controls, frontend routes, CDK deployment, cost estimate, risks, and acceptance criteria.
+- [ADR 0001](docs/adr/0001-serverless-authentication.md) — why the project uses a serverless, self-managed authentication stack.
 
 ## Security baseline
 
