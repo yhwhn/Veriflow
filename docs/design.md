@@ -1,4 +1,4 @@
-﻿# Design: Serverless Authentication Service on AWS
+# Design: Serverless Authentication Service on AWS
 
 - Status: Design draft - implementation not started
 - Date: 2026-11-07
@@ -116,7 +116,7 @@ These costs are part of what the project demonstrates; they are not problems to 
 
 ## 3. Constraints
 
-- Frontend: Vite + React (JavaScript, no TypeScript), React Router, plain CSS; no UI component library.
+- Frontend: Vite + React (JavaScript, no TypeScript), React Router, Tailwind CSS; no UI component library.
 - Backend: Node.js; an Express application runs on Lambda through `serverless-http`.
 - Lambda runtime: `nodejs22.x`; developer machines run Node 24, so the code stays compatible with both 22 and 24.
 - Database: DynamoDB on-demand; 4 tables; no GSI in version 1; no `Scan`.
@@ -240,7 +240,7 @@ An earlier iteration of this design ran Express and SQLite on a single host. The
 
 - Wrong code: `400 INVALID_CODE`; the remaining attempt count is not disclosed, only "the code is incorrect or has expired".
 - Expired code: same as above.
-- Resend: `POST /api/auth/resend-verification`; 60-second cooldown per email, at most 3 sends in 15 minutes; always returns `200` without revealing whether the email exists.
+- Resend: `POST /api/auth/resend-verification`; 60-second cooldown per email, at most 3 sends in 15 minutes; always returns `200` without revealing whether the email exists. If the account is already verified (`email_verified_at` present), it still returns `200` but sends no new code, changes no verification state, and does not reveal whether the account is verified.
 - Queue failure: the registration endpoint returns `503 EMAIL_QUEUE_UNAVAILABLE`; the user can resend later. The user record already exists, so resending does not require registering again.
 
 ### 6.2 Login
@@ -333,7 +333,7 @@ An earlier iteration of this design ran Express and SQLite on a single host. The
 
 | Layer | Choice | Notes |
 |---|---|---|
-| Frontend | Vite + React (JS) | React Router; plain CSS; no UI library |
+| Frontend | Vite + React (JS) | React Router; Tailwind CSS; no UI library |
 | Frontend hosting | S3 + CloudFront | Private bucket + OAC; custom domain + ACM |
 | API | API Gateway HTTP API | Cheap and sufficient; `/api/*` goes to Lambda |
 | Compute | Lambda (Node.js 22) | Express adapted through `serverless-http` |
@@ -697,7 +697,7 @@ UpdateItem {
 
 - Base path: `/api`.
 - JSON: requests use `Content-Type: application/json`; responses are `application/json`.
-- Authentication: the `HttpOnly` cookie `app_session`; MFA login uses `mfaToken` in the body, not a cookie.
+- Authentication: the `HttpOnly` cookie `__Host-app_session`; MFA login uses `mfaToken` in the body, not a cookie.
 - Error shape:
   ```json
   { "error": { "code": "INVALID_CREDENTIALS", "message": "Incorrect email or password" } }
@@ -824,13 +824,14 @@ Public messages are uniform and short; responses never include stack traces, SQL
 
 ### 10.1 Session cookie
 
-- Name: `app_session`.
+- Name: `__Host-app_session` (the `__Host-` prefix requires `Secure`, no `Domain` attribute, and HTTPS; it is defense-in-depth on top of `SameSite=Lax`).
 - Value: 32 random bytes, base64url; it appears only in the cookie, and the database stores its SHA-256.
 - Attributes: `HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=604800`.
 - Production requires HTTPS (CloudFront + ACM); local HTTP omits `Secure`, decided by environment.
 - No sliding renewal; the session expires after 7 days and the user signs in again.
 - Logout deletes the `Sessions` item and clears the cookie.
 - Password reset increments `session_version`; old sessions are rejected and deleted on their next request.
+- **Session fixation defense:** on successful sign-in and whenever `session_version` changes, the server issues a brand-new `token_hash` session cookie and invalidates the prior token on the server. It never reuses any pre-login session, including an anonymous pre-set cookie.
 
 ### 10.2 Passwords
 

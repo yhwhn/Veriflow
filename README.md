@@ -1,98 +1,109 @@
-# AWS Serverless Auth Service
+# Veriflow — AWS Serverless 认证服务
 
-A design-first authentication service for a small login-gated website. It covers the full account lifecycle on AWS without a fixed server bill: email/password registration, email verification, sign-in, optional email-code MFA, password reset, rate limiting, and short account lockouts.
+一个"登录优先"的认证服务，用于一个小型需登录的网站。它在 AWS 上以无固定服务器账单的方式覆盖完整账号生命周期：邮箱+密码注册、邮箱验证、登录、可选邮箱码 MFA、密码重置、限流与短时限账号锁定。
 
-> **Status: design phase.** No application code has been written yet. The implementation contract is [docs/design.md](docs/design.md).
+> **状态：设计阶段。** 尚未编写应用代码。实现契约位于 `docs/` 文档集：[design.md](docs/design.md)（后端架构）、[PRD.md](docs/PRD.md)（产品需求与验收标准）、[DESIGN_CN.md](docs/DESIGN_CN.md)（前端设计）、[TASKS.md](docs/TASKS.md)（任务拆分）、[ACCEPTANCE.md](docs/ACCEPTANCE.md)（验收清单）。
 
-## Why this project
+## 项目目标
 
-The goal is a cloud/backend portfolio project that demonstrates practical AWS design decisions, not just a CRUD demo moved onto an EC2 instance. The service is intentionally small, but it exercises the parts of authentication that are easy to get wrong: verification codes, session cookies, MFA, abuse controls, and asynchronous email delivery.
+目标是做一个云/后端方向的个人作品集项目，展示真实的 AWS 设计取舍，而不是把一个 CRUD demo 搬上 EC2。项目刻意做小，但覆盖了认证里容易做错的部分：验证码、会话 Cookie、MFA、滥用控制、异步邮件投递。
 
-The design targets **under $5/month at low traffic**, excluding domain registration.
+## 计划能力
 
-## Planned capabilities
+- 邮箱+密码注册；用 6 位邮箱验证码验证邮箱。
+- 登录与退出；刷新页面保持登录。
+- 可选邮箱码 MFA，默认关闭，可在设置页开启。
+- 忘记密码 / 重置密码，复用同一套邮箱验证码机制。
+- 登录、注册、发码、密码重置、MFA 的限流。
+- 密码或 MFA 连续失败后的短时账号锁定。
+- 一个最小受保护 `/app` 区域与一个公开的 `/resend-verification` 页。
 
-- Register with email and password; verify the email with a 6-digit code.
-- Sign in and sign out; keep the session across refreshes.
-- Optional email-code MFA, disabled by default and enabled from account settings.
-- Forgot-password and reset-password flows using the same email-code mechanism.
-- Rate limiting for login, registration, code sending, password reset, and MFA.
-- Short account lockouts after repeated password or MFA failures.
-- A minimal authenticated `/app` area and a public `/resend-verification` page.
+## 架构
 
-## Architecture
-
-```mermaid
-flowchart LR
-    U[Browser] --> CF[CloudFront]
-    CF --> S3[S3 static site]
-    CF -->|/api/*| APIGW[API Gateway HTTP API]
-    APIGW --> API[Lambda: Express API]
-    API --> DDB[(DynamoDB)]
-    API --> SQS[SQS queue]
-    SQS --> WORKER[Lambda: email worker]
-    WORKER --> SES[SES]
+```text
+Browser
+   │  https://app.example.com
+   ▼
+CloudFront (ACM, HTTPS, 自定义域名)
+   ├── /*      → S3 (React build, 私有桶 + OAC)
+   └── /api/*  → API Gateway HTTP API
+                    │
+                    ▼
+                 Lambda (Express via serverless-http)
+                    ├── DynamoDB: Users / Sessions / VerificationCodes / RateLimits
+                    ├── SQS: 发信任务
+                    └── CloudWatch / X-Ray
+                           │
+                           ▼
+                    Lambda (email worker) → SES → 用户邮箱
 ```
 
-The React site and the API share one CloudFront distribution, so the browser sees a single origin and session cookies stay simple. The API is an Express application packaged for Lambda with `serverless-http`; DynamoDB holds users, sessions, verification codes, and rate-limit counters. SES delivery is decoupled through SQS so a slow or failed email send does not block an HTTP request.
+React 站点与 API 共用一个 CloudFront 分发，浏览器看到单一源站，会话 Cookie 保持简单。API 是经 `serverless-http` 打包到 Lambda 的 Express 应用；DynamoDB 存放用户、会话、验证码、限流计数。SES 投递通过 SQS 解耦，使缓慢或失败的发信不阻塞 HTTP 请求。
 
-## Planned stack
+## 技术栈
 
-| Layer | Choice |
+| 层 | 选型 |
 |---|---|
-| Frontend | React + Vite + JavaScript, React Router |
-| API | Node.js 22, Express, `serverless-http` |
-| Compute | AWS Lambda behind API Gateway HTTP API |
-| Data | DynamoDB, four on-demand tables |
-| Email | SES, fed by an SQS queue and a worker Lambda |
-| Infrastructure | AWS CDK (TypeScript) |
-| CI/CD | GitHub Actions with OIDC to AWS |
-| Observability | CloudWatch logs, metrics, alarms; X-Ray tracing |
-| Region | `ap-southeast-1` by default, with `us-east-1` for the global edge certificate |
+| 前端 | React + Vite + JavaScript、React Router、Tailwind CSS |
+| API | Node.js 22、Express、`serverless-http` |
+| 计算 | API Gateway HTTP API 后的 AWS Lambda |
+| 数据 | DynamoDB，四张 On-Demand 表 |
+| 邮件 | SES，由 SQS 队列与 worker Lambda 驱动 |
+| 基础设施 | AWS CDK（TypeScript） |
+| CI/CD | GitHub Actions 通过 OIDC 对接 AWS |
+| 可观测 | CloudWatch 日志、指标、告警；X-Ray 追踪 |
+| 区域 | 默认 `ap-southeast-1`；全球边缘证书用 `us-east-1` |
 
-## Repository layout
+## 仓库结构
 
 ```text
 .
 ├── README.md
 ├── docs/
-│   ├── design.md          # full design, flows, data model, API, security, deployment
+│   ├── design.md          # 后端架构、流程、数据模型、API、安全、部署
+│   ├── PRD.md             # 产品需求 + Given/When/Then 验收标准
+│   ├── DESIGN_CN.md       # 前端设计：技术栈、组件拆分、数据流、API 契约、样式
+│   ├── TASKS.md           # 43 个任务的六阶段执行计划
+│   ├── ACCEPTANCE.md      # 由 PRD 派生的勾选式验收清单
 │   └── adr/
 │       └── 0001-serverless-authentication.md
 ├── .gitignore
-└── (application and infrastructure code will be added after design approval)
+└── (应用与基础设施代码将在设计批准后补充)
 ```
 
-## Documentation
+## 文档
 
-- [Design document](docs/design.md) — goals, non-goals, architecture, DynamoDB model, API contract, security controls, frontend routes, CDK deployment, cost estimate, risks, and acceptance criteria.
-- [ADR 0001](docs/adr/0001-serverless-authentication.md) — why the project uses a serverless, self-managed authentication stack.
+- [PRD](docs/PRD.md) — 产品概述、功能清单、页面清单、用户数据模型、业务规则、异常场景、25 条可验证验收标准、范围外清单。
+- [前端设计](docs/DESIGN_CN.md) — 技术栈（React Context + react-hook-form + zod + Tailwind CSS）、完整目录树、组件职责、数据流、完整 API 契约、开发配置约束。
+- [后端设计](docs/design.md) — 目标、非目标、架构、DynamoDB 模型、API 契约、安全控制、CDK 部署、成本估算、风险。
+- [任务计划](docs/TASKS.md) — 跨六个阶段的 43 个任务，每个映射到 PRD 功能点。
+- [验收清单](docs/ACCEPTANCE.md) — 把 PRD 验收标准整理为可按模块勾选的检查表。
+- [ADR 0001](docs/adr/0001-serverless-authentication.md) — 项目为何采用 Serverless 自建认证栈。
 
-## Security baseline
+## 安全基线
 
-The design deliberately keeps a small set of non-negotiable controls even in the MVP:
+设计在 MVP 中也保留一组不可妥协的控制：
 
-- Passwords hashed with bcrypt, cost factor 12.
-- Verification and MFA codes stored as HMAC-SHA256 digests, never plaintext.
-- Short-lived, single-use codes with attempt limits and resend cooldowns.
-- `HttpOnly`, `Secure`, `SameSite=Lax` session cookies.
-- Generic error messages that do not reveal whether an account exists.
-- Rate limits and lockouts enforced in DynamoDB, not only in process memory.
-- No secrets in source control; runtime secrets come from Secrets Manager.
+- 密码用 bcrypt 哈希，cost 12。
+- 验证码与 MFA 码以 HMAC-SHA256 摘要存储，绝不存明文。
+- 短时效、单次使用的码，带尝试次数上限与重发冷却。
+- 会话 Cookie 为 `HttpOnly`、`Secure`、`SameSite=Lax`，并带 `__Host-` 前缀；每次登录成功或 `session_version` 变更时重签发全新会话（会话固定防护）。
+- 统一错误文案，不泄露账号是否存在。
+- 限流与锁定在 DynamoDB 中强制，而非仅进程内存。
+- 源码不含密钥；运行期密钥来自 Secrets Manager。
 
-## Cost target
+## 成本目标
 
-The design is sized for a personal project: API Gateway, Lambda, DynamoDB on-demand, S3, CloudFront, SES, SQS, and CloudWatch are expected to total roughly **$1–3/month** at low traffic, with a hard budget target below **$5/month**. Domain registration is separate.
+设计面向个人项目：API Gateway、Lambda、DynamoDB On-Demand、S3、CloudFront、SES、SQS、CloudWatch 在低流量下预计合计约 **$1–3/月**，硬预算上限低于 **$5/月**。域名注册费用另计。
 
-## Roadmap
+## 后续步骤
 
-- [x] Write and review the serverless design.
-- [ ] Approve the design and create the implementation plan.
-- [ ] Build the authentication API and DynamoDB access layer.
-- [ ] Build the React account flows.
-- [ ] Add CDK infrastructure and GitHub Actions deployment.
-- [ ] Deploy to a development AWS account and run the acceptance tests.
+- 审批设计并制定实现计划。
+- 构建认证 API 与 DynamoDB 访问层。
+- 构建 React 账号流程。
+- 补充 CDK 基础设施与 GitHub Actions 部署。
+- 部署到开发用 AWS 账号并运行验收测试。
 
-## License
+## 许可证
 
-TBD. No license has been granted yet.
+尚未确定。暂未授予许可证。
