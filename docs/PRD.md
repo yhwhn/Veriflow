@@ -1,9 +1,9 @@
-# PRD — Veriflow（Vite + React 邮箱登录，AWS Serverless）
+# PRD — Veriflow（Vite + React 邮箱登录，AWS）
 
 ## 1. 产品概述
-- **一句话定位**：Veriflow 是一个部署在 AWS Serverless 上的登录优先小网站，用于演示完整的自建邮箱账号认证闭环。
+- **一句话定位**：Veriflow 是一个部署在 AWS 上的登录优先小网站，用于演示完整的自建邮箱账号认证闭环。
 - **目标用户**：需要注册/登录该网站的访客；查看项目代码与部署方式的技术人员（含面试评估者）。
-- **核心价值**：用托管服务（API Gateway、Lambda、DynamoDB、SES、SQS、CloudFront、CDK）亲手实现并展示可解释的云上认证，月成本低于 $5（不含域名）。
+- **核心价值**：用 CloudFront、Elastic Beanstalk、RDS PostgreSQL、SES、SQS、CDK 亲手实现并展示可解释的云上认证；认证逻辑自建，不依赖 Cognito 等托管身份产品。
 
 ## 2. 功能清单
 
@@ -17,11 +17,11 @@
 | 忘记密码 / 重置密码（6 位邮箱码） | P0 | 重置后旧会话失效 |
 | 重发验证码页 `/resend-verification` | P0 | 统一提示，不暴露邮箱是否存在 |
 | 可选邮箱码 MFA（默认关，设置页开关） | P1 | 登录多一步邮箱码 |
-| 登录 / 注册 / 发码 / MFA 限流 | P0 | DynamoDB 共享状态 |
+| 登录 / 注册 / 发码 / MFA 限流 | P0 | API 单实例内存计数 |
 | 密码 5 次失败锁 15 分钟、MFA 10 次失败锁 15 分钟 | P0 | 账号级短锁 |
-| AWS 部署（API Gateway、Lambda、DynamoDB、S3、CloudFront、SES、SQS、IAM、CDK） | P0 | 同源 `/api/*` |
-| GitHub Actions：测试、构建、CDK 部署、前端发布 | P1 | OIDC 无长期密钥 |
-| 基础告警（Lambda 错误、5xx、DLQ、DynamoDB 限流、SES 退信）+ 成本告警 | P1 | SNS 通知 |
+| AWS 部署（CloudFront、Elastic Beanstalk、RDS PostgreSQL、SES、SQS、IAM、CDK）+ GitHub Pages 前端发布 | P0 | 同源 `/api/*` |
+| GitHub Actions：测试、构建、CDK 部署、前端发布到 GitHub Pages | P1 | OIDC 无长期密钥 |
+| 基础告警（EB 应用错误、5xx、DLQ、RDS 指标、SES 退信）+ 成本告警 | P1 | SNS 通知 |
 
 ## 3. 页面清单
 
@@ -44,7 +44,7 @@
 |---|---|---|---|
 | `email` | String | 是 | 主键；trim + lowercase |
 | `user_id` | String | 是 | `crypto.randomUUID()` |
-| `password_hash` | String | 是 | bcryptjs cost 12 |
+| `password_hash` | String | 是 | argon2id 哈希 |
 | `email_verified_at` | Number(epoch秒) | 否 | 未验证则不存在 |
 | `mfa_enabled` | Boolean | 是 | 默认 false |
 | `failed_login_count` | Number | 是 | 连续密码失败计数 |
@@ -54,11 +54,11 @@
 | `created_at` | Number | 是 | epoch 秒 |
 | `updated_at` | Number | 是 | epoch 秒 |
 
-关联表（各自的访问模式见设计文档，不属于本表字段）：Sessions（`token_hash` PK）、VerificationCodes（`scope`+`sort_key` PK）、RateLimits（`bucket` PK）。
+关联表（各自的访问模式见设计文档，不属于本表字段）：`sessions`（`token_hash` 主键）、`verification_codes`、`used_mfa_tokens`。限流计数由 API 单实例内存维护，不建表。
 
 ## 5. 业务规则
 
-- **字段校验**：邮箱格式校验、trim+lowercase；密码最短 8 **字节**、最长 72 **字节**，按 `Buffer.byteLength` 计字节数（非 UTF-16 码元 `length`）；不 trim、不限特殊字符；确认密码须一致。
+- **字段校验**：邮箱格式校验、trim+lowercase；密码最短 8 **字节**、最长 72 **字节**，按字节长度计（非 UTF-16 码元 `length`）；不 trim、不限特殊字符；确认密码须一致。
 - **验证码**：6 位数字、10 分钟有效、最多 5 次尝试、60 秒重发、单次使用；只存 HMAC-SHA256，不存明文、不返回客户端。**尝试次数按"码"计，不按"账号窗口"计；每次重发会 mint 一条 `attempts=0` 的新码并令旧码失效，因此重发会重置该码预算——重发限流（而非"5 次"）才是真实的试错边界。**
 - **会话**：7 天；HttpOnly + Secure + SameSite=Lax；库只存 token 的 SHA-256；不做滑动续期；重置密码 `session_version += 1` 使旧会话失效。**会话固定防护：登录成功与 `session_version` 变更时必须签发全新 `token_hash` 的会话 Cookie，不复用登录前已有的任何会话（含匿名预置 cookie），旧 token 服务端作废。**
 - **MFA**：可选、默认关；只做邮箱码；`mfaToken` HMAC 签名、10 分钟；仅放 React state，不落 localStorage。**`mfaToken` 单次使用：`mfa/verify` 成功后该 token 作废，不可重放。同一账号可并存多个未过期 `mfaToken`（每次登录 challenge 都签发新 token），设计不提供单 token 撤销，依赖 10 分钟过期与 `session_version` 失效。**
@@ -66,7 +66,7 @@
 - **锁定**：密码连续失败 5 次 → `locked_until = now+15min`；MFA 连续失败 10 次 → 同；登录成功清零；重置密码清零。**重置密码失败不计入账号锁定**：`reset-password` 的码试错既不增 `failed_login_count` 也不增 `failed_mfa_count`，账号永不因重置试错被锁，仅受重置接口 IP 限流（10/15 分钟）约束。此为已知取舍（6 位码 + 10 分钟过期已拉长爆破窗口）；若要求重置失败也锁账号，须将其并入 `failed_login_count` 或独立计数并接同一把锁。
 - **重发验证码（已验证账号）**：若账号 `email_verified_at` 已存在，提交 `/resend-verification` 仍返回 `200`，但**不发送新码、不修改验证状态、不通过文案或差异响应暴露账号是否已验证**（统一提示"如果存在，已发送验证码"）。
 - **错误文案**：统一、简短；不暴露"账号是否存在"；登录失败不区分"密码错"与"邮箱不存在"；锁定不区分密码/MFA。
-- **安全底线**：bcrypt 哈希；验证码 HMAC；Cookie 属性；日志不记密码/码/Cookie/完整 token；IP 哈希、UA 截断；DynamoDB 只用 GetItem/Query/PutItem/UpdateItem/DeleteItem/TransactWriteItems，禁止 `Scan`、无 GSI；IAM 最小权限、S3 阻止公开访问、密钥存 Secrets Manager。
+- **安全底线**：argon2id 哈希；验证码 HMAC；Cookie 属性；日志不记密码/码/Cookie/完整 token；IP 哈希、UA 截断；数据库访问全部使用参数化 SQL，禁止字符串拼接；IAM 最小权限、密钥来自 EB 环境属性 / SSM Parameter Store，进程启动时加载。
 
 ## 6. 异常场景
 
@@ -79,14 +79,14 @@
 - 网络/服务端 5xx（前端统一错误提示，任意 401 回登录）。
 - `/mfa` 刷新丢失 `mfaToken` → 回 `/login`。
 - 重置密码后旧会话下次请求被拒并删除。
-- TTL 延迟导致过期项仍可被读到（读必查 `expires_at`）。
-- 同一验证码并发消费、同一邮箱并发注册（条件写保证仅一个成功）。
+- 过期数据采用读时惰性删除（读必查 `expires_at`）。
+- 同一验证码并发消费、同一邮箱并发注册（数据库唯一约束与条件更新保证仅一个成功）。
 - 锁定 DoS：攻击者可锁他人账号（短锁 + IP 限流缓解）。
-- MFA 邮箱丢失：无恢复码，需管理员在控制台/DynamoDB 处理。
+- MFA 邮箱丢失：无恢复码，需管理员在控制台/数据库处理。
 - `mfaToken` 重放与并存：成功 `mfa/verify` 后 token 应作废；同账号可并存多个未过期 `mfaToken`，旧 token 在 10 分钟窗口内仍可被使用，无单 token 撤销。
 - 重发验证码重置尝试预算：每次重发 mint 新码并令旧码失效，旧的 5 次尝试预算被重置；"5 次"不是账号级上限，重发限流才是真实边界。
 - 边界突发（固定窗口限流）：窗口交界处的突发可瞬时通过约 2 倍限额（前后两窗口各计一次）。
-- 密码字节长度：多字节字符（中文/emoji）下，按 `length` 计会误判 72 上限；须按字节长度校验；bcrypt 静默截断到 72 字节。
+- 密码字节长度：多字节字符（中文/emoji）下，按 `length` 计会误判 72 上限；须按字节长度校验。
 - 重置密码失败不走账号锁：重置码试错只受 IP 限流约束，账号永不因重置试错被锁。
 - 会话固定：若登录成功复用登录前已有的会话 Cookie（含匿名预置 token），攻击者可诱导受害者沿用旧 token。防护为登录成功/提权时重签发全新会话（见 §5 会话段）。
 - 重发验证码（已验证账号）：已验证账号请求 `/resend-verification` 的行为未定义则实现会各写各的；按 §5 规则应返回 200 但不再发码、不改状态、不泄露验证状态。
@@ -99,7 +99,7 @@
 1. **注册成功并发码**
    - Given 未注册的合法邮箱与合规密码
    - When 提交 `/api/auth/register`
-   - Then 返回 `201`，`VerificationCodes` 写入一条 `purpose=verify_email` 记录，SQS 出现一条发信消息，用户 `email_verified_at` 不存在
+   - Then 返回 `201`，`verification_codes` 写入一条 `purpose=verify_email` 记录，SQS 出现一条发信消息，用户 `email_verified_at` 不存在
 
 2. **重复注册**
    - Given 已注册邮箱
@@ -147,7 +147,7 @@
 10. **退出登录**
     - Given 已登录用户
     - When 提交 `POST /api/auth/logout`
-    - Then 返回 `204`，`Sessions` 对应项被删除，Cookie 被清除
+    - Then 返回 `204`，`sessions` 对应项被删除，Cookie 被清除
 
 11. **找回密码使旧会话失效**
     - Given 已登录用户 A，另一设备发起忘记密码→重置成功
@@ -161,18 +161,18 @@
 
 13. **验证码不落明文**
     - Given 任意发码动作完成
-    - When 直接读取 `VerificationCodes` 表项
+    - When 直接读取 `verification_codes` 表行
     - Then `code_hash` 为 HMAC 值，表中不存在原始 6 位码字段
 
-14. **限流状态跨实例有效**
+14. **并发请求限流有效**
     - Given 至少 10 个并发登录请求命中同一限流键
     - When 计数达到限额
-    - Then 超限请求全部返回 `429`，且总计数不超过限额 + 容差（DynamoDB 原子 `ADD`）
+    - Then 超限请求全部返回 `429`，且总计数不超过限额 + 容差（单实例内存计数）
 
 15. **静态资源与 API 同源**
     - Given 通过 CloudFront 域名访问
     - When 浏览器加载前端并发起 `/api/*` 请求
-    - Then 请求经同一 CloudFront 分发到 API Gateway，Cookie 不跨站
+    - Then 请求经同一 CloudFront 分发到 Elastic Beanstalk，Cookie 不跨站
 
 16. **安全响应头**
     - Given 通过 CloudFront 访问任意页面
@@ -192,7 +192,7 @@
 19. **密码字节长度边界**
     - Given 一个恰为 72 字节的多字节密码（如含中文/emoji）与 73 字节密码
     - When 提交注册
-    - Then 72 字节成功 `201`；73 字节被拒（`VALIDATION_ERROR`），校验按 `Buffer.byteLength` 而非 `.length`
+    - Then 72 字节成功 `201`；73 字节被拒（`VALIDATION_ERROR`），校验按字节长度而非 `.length`
 
 20. **mfaToken 单次使用**
     - Given 一个已用于 `mfa/verify` 成功的 `mfaToken`
@@ -215,7 +215,7 @@
     - Then 账号未被 `locked_until` 阻塞（重置失败不计入 `failed_login_count`/`failed_mfa_count`，仅受重置接口 IP 限流约束）
 
 24. **登录成功后重签发会话（防会话固定）**
-    - Given 登录前浏览器已持有任意 `app_session` Cookie（含匿名预置）
+    - Given 登录前浏览器已持有任意 `__Host-app_session` Cookie（含匿名预置）
     - When 提交正确凭证登录成功
     - Then 响应 Set-Cookie 为新 `token_hash`，旧会话在服务端被作废；后续请求仅新 token 有效
 

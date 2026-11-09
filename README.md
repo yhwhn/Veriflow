@@ -1,14 +1,14 @@
-# Veriflow — AWS Serverless 认证服务
+# Veriflow — AWS 认证服务
 
-一个"登录优先"的认证服务，用于一个小型需登录的网站。它在 AWS 上以无固定服务器账单的方式覆盖完整账号生命周期：邮箱+密码注册、邮箱验证、登录、可选邮箱码 MFA、密码重置、限流与短时限账号锁定。
+Veriflow 是一个"登录优先"的认证服务，用于一个小型需登录的网站。它覆盖完整账号生命周期：邮箱+密码注册、邮箱验证、登录、可选邮箱码 MFA、密码重置、限流与短时限账号锁定。认证逻辑由项目自身实现，不依赖托管身份产品。
 
-> **状态：设计阶段。** 尚未编写应用代码。实现契约位于 `docs/` 文档集：[design.md](docs/design.md)（后端架构）、[PRD.md](docs/PRD.md)（产品需求与验收标准）、[DESIGN_CN.md](docs/DESIGN_CN.md)（前端设计）、[TASKS.md](docs/TASKS.md)（任务拆分）、[ACCEPTANCE.md](docs/ACCEPTANCE.md)（验收清单）。
+本仓库收录 Veriflow 的设计文档集：[PRD.md](docs/PRD.md)（产品需求与验收标准）、[design.md](docs/design.md)（系统架构、数据模型、接口契约、部署）、[TASKS.md](docs/TASKS.md)（任务拆分）、[ACCEPTANCE.md](docs/ACCEPTANCE.md)（验收清单）、[CHANGELOG.md](CHANGELOG.md)（变更记录）。
 
 ## 项目目标
 
-目标是做一个云/后端方向的个人作品集项目，展示真实的 AWS 设计取舍，而不是把一个 CRUD demo 搬上 EC2。项目刻意做小，但覆盖了认证里容易做错的部分：验证码、会话 Cookie、MFA、滥用控制、异步邮件投递。
+做一个云/后端方向的个人作品集项目，展示真实的 AWS 架构与自建认证实现。项目刻意做小，但覆盖认证里容易做错的部分：验证码、会话 Cookie、MFA、滥用控制、异步邮件投递。
 
-## 计划能力
+## 能力
 
 - 邮箱+密码注册；用 6 位邮箱验证码验证邮箱。
 - 登录与退出；刷新页面保持登录。
@@ -22,87 +22,118 @@
 
 ```text
 Browser
-   │  https://app.example.com
+   │  https://<cloudfront-domain>
    ▼
-CloudFront (ACM, HTTPS, 自定义域名)
-   ├── /*      → S3 (React build, 私有桶 + OAC)
-   └── /api/*  → API Gateway HTTP API
-                    │
-                    ▼
-                 Lambda (Express via serverless-http)
-                    ├── DynamoDB: Users / Sessions / VerificationCodes / RateLimits
-                    ├── SQS: 发信任务
-                    └── CloudWatch / X-Ray
-                           │
-                           ▼
-                    Lambda (email worker) → SES → 用户邮箱
+CloudFront（唯一入口；Viewer → CloudFront 为 HTTPS）
+   ├── /*      → yhwhn.github.io（GitHub Pages，HTTPS Only 源站，静态站点）
+   └── /api/*  → Elastic Beanstalk（单实例，HTTP Only 源站，CachingDisabled）
+                     │
+                     ▼
+                  Express（Node.js 22，常驻进程）
+                     ├── RDS PostgreSQL（users / sessions / verification_codes / used_mfa_tokens）
+                     ├── 限流计数（单实例内存）
+                     └── SQS：发信任务
+                            │
+                            ▼
+                     EB 常驻 worker 进程 → SES → 用户邮箱
+
+CloudFront Response Headers Policy：CSP / HSTS / X-Content-Type-Options
+CloudFront Custom Error Pages：403/404 → /index.html（SPA fallback）
 ```
 
-React 站点与 API 共用一个 CloudFront 分发，浏览器看到单一源站，会话 Cookie 保持简单。API 是经 `serverless-http` 打包到 Lambda 的 Express 应用；DynamoDB 存放用户、会话、验证码、限流计数。SES 投递通过 SQS 解耦，使缓慢或失败的发信不阻塞 HTTP 请求。
+浏览器只访问 CloudFront 默认域名。前端是 GitHub Pages 上的静态站点，API 是 Elastic Beanstalk 上常驻的 Express 应用；两者经同一 CloudFront 分发按路径分流，浏览器看到单一源站，会话 Cookie 保持同源。GitHub Pages 侧不配置自定义域名，自定义域名（若使用）配在 CloudFront 的 Alternate Domain Name。
 
 ## 技术栈
 
 | 层 | 选型 |
 |---|---|
 | 前端 | React + Vite + JavaScript、React Router、Tailwind CSS |
-| API | Node.js 22、Express、`serverless-http` |
-| 计算 | API Gateway HTTP API 后的 AWS Lambda |
-| 数据 | DynamoDB，四张 On-Demand 表 |
-| 邮件 | SES，由 SQS 队列与 worker Lambda 驱动 |
+| 前端托管 | GitHub Pages（用户页 `yhwhn.github.io`） |
+| 入口 / CDN | CloudFront（多源站、按路径分流、Response Headers Policy、Custom Error Pages） |
+| API | Node.js 22、Express（原生，不经 serverless 适配层） |
+| 计算 | AWS Elastic Beanstalk 单实例，托管 Node.js 平台 |
+| 数据 | RDS PostgreSQL 单 AZ，原生 `pg` + 参数化 SQL |
+| 密码哈希 | argon2id |
+| 限流 | 单实例内存计数 |
+| 邮件 | SES，经 SQS 与 EB 常驻 worker 进程异步投递 |
+| 密钥 | EB 环境属性 / SSM Parameter Store，进程启动时加载 |
 | 基础设施 | AWS CDK（TypeScript） |
-| CI/CD | GitHub Actions 通过 OIDC 对接 AWS |
-| 可观测 | CloudWatch 日志、指标、告警；X-Ray 追踪 |
-| 区域 | 默认 `ap-southeast-1`；全球边缘证书用 `us-east-1` |
+| CI/CD | GitHub Actions（前端发布到 GitHub Pages）+ OIDC 对接 AWS |
+| 可观测 | CloudWatch 日志、指标、告警 |
+| 区域 | 默认 `ap-southeast-1` |
 
 ## 仓库结构
 
 ```text
 .
 ├── README.md
+├── CHANGELOG.md
+├── agent.md
 ├── docs/
-│   ├── design.md          # 后端架构、流程、数据模型、API、安全、部署
-│   ├── PRD.md             # 产品需求 + Given/When/Then 验收标准
-│   ├── DESIGN_CN.md       # 前端设计：技术栈、组件拆分、数据流、API 契约、样式
-│   ├── TASKS.md           # 43 个任务的六阶段执行计划
-│   ├── ACCEPTANCE.md      # 由 PRD 派生的勾选式验收清单
-│   └── adr/
-│       └── 0001-serverless-authentication.md
+│   ├── PRD.md          # 产品需求 + Given/When/Then 验收标准
+│   ├── design.md       # 系统架构、数据模型、接口契约、安全、部署、成本（英文）
+│   ├── TASKS.md        # 43 个任务的六阶段执行计划（英文）
+│   └── ACCEPTANCE.md   # 由 PRD 派生的勾选式验收清单
 ├── .gitignore
-└── (应用与基础设施代码将在设计批准后补充)
+└── .gitattributes
 ```
 
 ## 文档
 
 - [PRD](docs/PRD.md) — 产品概述、功能清单、页面清单、用户数据模型、业务规则、异常场景、25 条可验证验收标准、范围外清单。
-- [前端设计](docs/DESIGN_CN.md) — 技术栈（React Context + react-hook-form + zod + Tailwind CSS）、完整目录树、组件职责、数据流、完整 API 契约、开发配置约束。
-- [后端设计](docs/design.md) — 目标、非目标、架构、DynamoDB 模型、API 契约、安全控制、CDK 部署、成本估算、风险。
-- [任务计划](docs/TASKS.md) — 跨六个阶段的 43 个任务，每个映射到 PRD 功能点。
+- [系统设计](docs/design.md) — 目标与非目标、架构、PostgreSQL 数据模型、完整 API 契约、安全控制、CDK 部署、成本估算、风险（英文）。
+- [任务计划](docs/TASKS.md) — 跨六个阶段的 43 个任务，每个映射到 PRD 功能点（英文）。
 - [验收清单](docs/ACCEPTANCE.md) — 把 PRD 验收标准整理为可按模块勾选的检查表。
-- [ADR 0001](docs/adr/0001-serverless-authentication.md) — 项目为何采用 Serverless 自建认证栈。
+- [变更记录](CHANGELOG.md) — 架构与文档的决策、历史记录（英文）。
+- [内容纪律](agent.md) — 代码 / UI / 文档的内容边界。
 
 ## 安全基线
 
 设计在 MVP 中也保留一组不可妥协的控制：
 
-- 密码用 bcrypt 哈希，cost 12。
+- 密码用 argon2id 哈希。
 - 验证码与 MFA 码以 HMAC-SHA256 摘要存储，绝不存明文。
 - 短时效、单次使用的码，带尝试次数上限与重发冷却。
 - 会话 Cookie 为 `HttpOnly`、`Secure`、`SameSite=Lax`，并带 `__Host-` 前缀；每次登录成功或 `session_version` 变更时重签发全新会话（会话固定防护）。
 - 统一错误文案，不泄露账号是否存在。
-- 限流与锁定在 DynamoDB 中强制，而非仅进程内存。
-- 源码不含密钥；运行期密钥来自 Secrets Manager。
+- 限流计数由 API 单实例内存维护，锁定状态落在数据库；数据库访问全部使用参数化 SQL。
+- 源码不含密钥；运行期密钥来自 EB 环境属性 / SSM Parameter Store，进程启动时加载。
 
-## 成本目标
+## 成本
 
-设计面向个人项目：API Gateway、Lambda、DynamoDB On-Demand、S3、CloudFront、SES、SQS、CloudWatch 在低流量下预计合计约 **$1–3/月**，硬预算上限低于 **$5/月**。域名注册费用另计。
+系统按小时固定计费：Elastic Beanstalk 单实例（EC2）、RDS PostgreSQL 单 AZ 实例与存储构成主要支出，CloudFront、SQS、SES、CloudWatch 在低流量下接近免费套餐。低流量下预计合计约 **$20–30/月**（不含域名，不含首年免费套餐抵扣），不设硬上限，配有成本告警用于可见性。详细估算见 [design.md](docs/design.md) §15。
 
-## 后续步骤
+## 本地开发
 
-- 审批设计并制定实现计划。
-- 构建认证 API 与 DynamoDB 访问层。
-- 构建 React 账号流程。
-- 补充 CDK 基础设施与 GitHub Actions 部署。
-- 部署到开发用 AWS 账号并运行验收测试。
+```bash
+# 1. 启动 PostgreSQL
+docker run -d --name veriflow-postgres -e POSTGRES_PASSWORD=dev -e POSTGRES_DB=veriflow -p 5432:5432 postgres:16
+
+# 2. 安装依赖
+npm install
+
+# 3. 初始化 schema
+npm run db:local
+
+# 4. 启动 web + api
+npm run dev
+```
+
+- `web`：Vite 在 `http://localhost:5173`，把 `/api` 代理到 `http://localhost:3001`。
+- `api`：Express 在 `http://localhost:3001`，连接本地 PostgreSQL。
+- `EMAIL_DRIVER=console`：验证码打印在 API 终端，不联系 SES 与 SQS。
+
+## 部署
+
+```bash
+npm ci
+npm run build
+cd infra
+npx cdk bootstrap
+npx cdk deploy --all -c env=dev
+```
+
+CDK 创建 RDS PostgreSQL、Elastic Beanstalk 应用与环境、SQS 队列与 DLQ、CloudFront 分发、IAM 与 CloudWatch 告警。CloudFront 默认行为指向 GitHub Pages 源站，`/api/*` 行为指向 Elastic Beanstalk。前端构建产物由 GitHub Actions 发布到 GitHub Pages；GitHub Actions 通过 OIDC 获取临时 AWS 凭据，不使用长期密钥。浏览器入口使用 CloudFront 默认域名，版本一不配置自定义域名、ACM 证书或 Route 53。
 
 ## 许可证
 
